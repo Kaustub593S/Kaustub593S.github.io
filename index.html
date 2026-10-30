@@ -20,6 +20,7 @@ body{font:16px/1.5 ui-monospace,SFMono-Regular,"Cascadia Code",Consolas,Menlo,mo
 .l{white-space:pre-wrap;word-break:break-word;min-height:1.5em}
 .p{color:var(--g);font-weight:700}.pa{color:var(--t)}.k{color:var(--t)}.d{color:var(--dim)}.e{color:var(--r)}.w{color:var(--a)}.ok{color:var(--g)}
 a{color:var(--t)}
+.tr{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;margin:6px 0}.nd{border:1px solid color-mix(in srgb,var(--fg) 25%,transparent);border-radius:4px;padding:0 7px;font-size:13px;color:var(--dim);transition:all .25s}.nd.on{border-color:var(--t);color:var(--t);box-shadow:0 0 10px color-mix(in srgb,var(--t) 50%,transparent)}.nd.ok{border-color:var(--g);color:var(--g)}.nd.bad{border-color:var(--r);color:var(--r);box-shadow:0 0 10px color-mix(in srgb,var(--r) 50%,transparent)}.ar{color:var(--dim)}
 #row{display:flex;gap:0;align-items:center}
 #row.off{display:none}
 #inp{flex:1;min-width:0;background:none;border:0;outline:0;color:var(--fg);font:inherit;caret-color:var(--g);padding:0}
@@ -52,12 +53,63 @@ const esc=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const k=s=>`<span class="k">${s}</span>`,dm=s=>`<span class="d">${s}</span>`;
 const RESUME_URL=''; /* paste your resume link here */
 let hist=[],hi=0,dead=false,busy=true,tokens=6,last=Date.now();
+let jwt=null,role=null;
+const LAYERS=['Client','Filter chain','Controller','Service','Repository','PostgreSQL'];
+const TXT={200:'OK',401:'Unauthorized',403:'Forbidden',404:'Not Found',405:'Method Not Allowed'};
+function auth(lc){
+  if(lc==='logout'){jwt=role=null;print(dm('Token discarded. You are anonymous again.'));return}
+  role=lc==='login admin'?'ADMIN':'USER';
+  jwt='eyJhbGciOiJIUzI1NiJ9.'+btoa(JSON.stringify({sub:'visitor',role})).replace(/=/g,'')+'.sig';
+  print(`<span class="ok">200 OK</span> POST /login → JWT issued (role ${k(role)})`);
+  print(dm(jwt.slice(0,44)+'…'));
+  print(dm('Requests now carry the token. Try: curl localhost:8080/api/admin'));
+}
+async function trace(m,path,steps,status,body){
+  const id='tr'+Date.now();
+  print(`${dm('→')} ${k(m)} ${esc(path)} ${dm('(Authorization: '+(jwt?'Bearer …':'none')+')')}`);
+  print(`<div class="tr" id="${id}">`+LAYERS.map(n=>`<span class="nd">${n}</span>`).join('<span class="ar">→</span>')+'</div>');
+  const nodes=[...document.querySelectorAll('#'+id+' .nd')];
+  nodes[0].classList.add('on');
+  let last=0;
+  for(const s of steps){
+    await sleep(420);
+    nodes[s.l].classList.add(s.bad?'bad':'on');
+    print(`  ${dm('['+LAYERS[s.l].toLowerCase()+']')} ${s.log}`,s.bad?'e':'');
+    last=s.l;if(s.bad)break;
+  }
+  await sleep(350);
+  for(let i=last;i>=0;i--){const n=nodes[i];if(!n.classList.contains('bad')){n.classList.remove('on');if(status<400)n.classList.add('ok')}await sleep(140)}
+  print(`<span class="${status<400?'ok':'e'}">HTTP/1.1 ${status} ${TXT[status]}</span>`);
+  print(esc(JSON.stringify(body)));
+}
+async function curl(cmd){
+  const t=cmd.split(/\s+/).slice(1);let m='GET',u='';
+  for(let i=0;i<t.length;i++){const a=t[i];if(a==='-X'||a==='--request')m=(t[++i]||'GET').toUpperCase();else if(a==='-H'||a==='-d'||a==='--data')i++;else if(!a.startsWith('-'))u=a}
+  const p=(u.replace(/^https?:\/\//,'').replace(/^localhost:8080/,'').replace(/\/+$/,'')||'/').toLowerCase();
+  const f=jwt?`JwtAuthFilter: token valid, role ${k(role)}`:'JwtAuthFilter: public route, no token needed';
+  const deny=need=>{if(!jwt)return [[{l:1,log:'JwtAuthFilter: no Authorization header → reject',bad:1}],401,{error:'Unauthorized'}];if(need&&role!==need)return [[{l:1,log:`JwtAuthFilter: token valid, but role ${role} lacks ${need} → reject`,bad:1}],403,{error:'Forbidden'}];return null};
+  const names=['Vaultify','URL Shortener','Task Manager','API Rate Limiter','Prompt-to-App AI Platform'];
+  const ro=m!=='GET'&&(['/health','/api/skills','/api/projects'].includes(p)||p.startsWith('/api/projects/'));
+  let r;
+  if(ro)r=deny('ADMIN')||[[{l:1,log:f},{l:2,log:`${m} is not mapped on this route → 405`,bad:1}],405,{error:'Method Not Allowed'}];
+  else if(p==='/health')r=[[{l:1,log:f},{l:2,log:'HealthEndpoint.health()'}],200,{status:'UP'}];
+  else if(p==='/api/skills')r=[[{l:1,log:f},{l:2,log:'SkillController.list()'},{l:3,log:'SkillService.findAll()'},{l:4,log:'SkillRepository.findAll()'},{l:5,log:'SELECT * FROM skills → 4 rows'}],200,{language:['Java','C','Python','SQL'],framework:['Spring Boot','Spring Security','JPA/Hibernate'],data:['PostgreSQL','Redis'],agents:['Google ADK','A2A']}];
+  else if(p==='/api/projects')r=[[{l:1,log:f},{l:2,log:'ProjectController.list()'},{l:3,log:'ProjectService.findAll()'},{l:4,log:'ProjectRepository.findAll()'},{l:5,log:'SELECT * FROM projects → 5 rows'}],200,names];
+  else if(p.startsWith('/api/projects/')){
+    const key=p.slice(14),pk=ALIAS[key]||key;
+    if(PROJ[pk])r=[[{l:1,log:f},{l:2,log:`ProjectController.get("${esc(key)}")`},{l:3,log:'ProjectService.find()'},{l:4,log:'ProjectRepository.findByName()'},{l:5,log:'SELECT * FROM projects WHERE name = ? → 1 row'}],200,{project:key,hint:'run: project '+key}];
+    else r=[[{l:1,log:f},{l:2,log:`ProjectController.get("${esc(key)}")`},{l:3,log:'ProjectService throws ProjectNotFoundException, @RestControllerAdvice maps it to 404',bad:1}],404,{error:'Project not found'}];
+  }
+  else if(p==='/api/admin')r=deny('ADMIN')||[[{l:1,log:f},{l:2,log:'AdminController.panel()'},{l:3,log:'AdminService.secret()'},{l:4,log:'AdminRepository.find()'},{l:5,log:'SELECT message FROM admin → 1 row'}],200,{message:'You found the admin panel. Now go email me.'}];
+  else r=[[{l:1,log:f},{l:2,log:'DispatcherServlet: no handler mapped → 404',bad:1}],404,{error:'Not Found'}];
+  await trace(m,p,...r);
+}
 
 function print(h,c){const d=document.createElement('div');d.className='l '+(c||'');d.innerHTML=h;out.appendChild(d);scr.scrollTop=scr.scrollHeight}
 function take(){const n=Date.now();tokens=Math.min(6,tokens+(n-last)/1500);last=n;if(tokens>=1){tokens--;return true}return false}
 async function typeInto(t,ms=70){for(const ch of t){inp.value+=ch;await sleep(ms+Math.random()*40)}}
 
-const CMDS=['help','/help','skills','whoami','projects','project','experience','achievements','contact','resume','neofetch','history','clear','docker ps','redis-cli ping','curl localhost:8080/health','revelio'];
+const CMDS=['help','/help','skills','whoami','projects','project','experience','achievements','contact','resume','neofetch','history','clear','docker ps','redis-cli ping','login','login admin','logout','curl localhost:8080/api/projects','curl localhost:8080/api/skills','curl localhost:8080/api/admin','curl localhost:8080/health','revelio'];
 const SPELLS=['lumos','nox','avada kedavra','reparo','accio resume','obliviate','crucio','imperio','sorting hat'];
 
 const PROJ={
@@ -77,14 +129,16 @@ stack   Java · Spring Boot · Spring Security · PostgreSQL · Postman
 detail  enum-based status transitions, centralized exception management,
         all endpoints secured with authn/authz
 repo    <a href="https://github.com/Kaustub593S/TaskManager" target="_blank" rel="noopener">github.com/Kaustub593S/TaskManager</a>`,
-promptapp:`${k('Prompt-to-App AI Platform')}  in progress
-stack   Java · Spring Boot · React · PostgreSQL · Docker · OpenAI API
+promptapp:`${k('Prompt-to-App AI Platform')}  built with Lovable
+stack   React · Lovable
 detail  turns natural-language requirements into web app architectures and code;
-        agentic workflow for planning, generation and iterative refinement`,
-ratelimiter:`${k('API Rate Limiter')}  in progress
+        agentic workflow for planning, generation and iterative refinement
+repo    <a href="https://github.com/Kaustub593S?tab=repositories" target="_blank" rel="noopener">github.com/Kaustub593S</a>`,
+ratelimiter:`${k('API Rate Limiter')}  token bucket middleware
 stack   Java · Spring Boot · Redis
 detail  token bucket algorithm, Redis for distributed state, request-interception
-        middleware. The limiter on this page is the same idea in JS: try spamming.`
+        middleware. The limiter on this page is the same idea in JS: try spamming.
+repo    <a href="https://github.com/Kaustub593S?tab=repositories" target="_blank" rel="noopener">github.com/Kaustub593S</a>`
 };
 const ALIAS={'url shortener':'urlshortener','url':'urlshortener','task manager':'taskmanager','tasks':'taskmanager','prompt-to-app':'promptapp','prompt':'promptapp','rate limiter':'ratelimiter','limiter':'ratelimiter'};
 
@@ -97,6 +151,8 @@ help:()=>print(`${k('Commands')}
   ${k('achievements')}   open source, contests, scholarships
   ${k('contact')}        get in touch
   ${k('resume')}         resume
+  ${k('curl localhost:8080/api/projects')}  send a request through the Spring layers
+  ${k('curl localhost:8080/api/admin')} · ${k('login')} · ${k('login admin')} · ${k('logout')}
   ${k('curl localhost:8080/health')}
   ${k('neofetch')} · ${k('history')} · ${k('clear')}
   ${k('Tab')} completes, ${k('↑ ↓')} walks history
@@ -118,8 +174,8 @@ whoami:()=>print(`{
 projects:()=>print(`${k('Vaultify')}                 secure personal finance backend
 ${k('URL Shortener')}            collision-free short codes, indexed lookups
 ${k('Task Manager')}             secured REST backend, status transitions
-${k('Prompt-to-App AI Platform')} agentic app generator ${dm('(in progress)')}
-${k('API Rate Limiter')}         token bucket + Redis ${dm('(in progress)')}
+${k('Prompt-to-App AI Platform')} prompt → web app, built with Lovable
+${k('API Rate Limiter')}         token bucket + Redis
 ${dm('Try: project vaultify')}`),
 experience:()=>print(`${dm('commit')} <span class="w">a2a0e1</span> ${dm('(HEAD -> main)')}
 Author: Kaustub Gairola
@@ -140,7 +196,7 @@ ${k('KIIT')}             Merit-Based Scholarship
 ${k('HackerRank')}       Java certification`),
 contact:()=>print(`POST /contact
   ${k('email')}     <a href="mailto:mailtokaustubgairola@gmail.com">mailtokaustubgairola@gmail.com</a>
-  ${k('linkedin')}  <a href="https://linkedin.com/in/kaustub-gairola-245865333/" target="_blank" rel="noopener">linkedin.com/in/kaustub-gairola-245865333</a>
+  ${k('linkedin')}  <a href="https://www.linkedin.com/in/kaustub-gairola/" target="_blank" rel="noopener">linkedin.com/in/kaustub-gairola</a>
   ${k('github')}    <a href="https://github.com/Kaustub593S" target="_blank" rel="noopener">github.com/Kaustub593S</a>
 ${dm('HTTP/1.1 201 Created. Looking forward to your message.')}`),
 resume:()=>RESUME_URL?print(`Resume: <a href="${RESUME_URL}" target="_blank" rel="noopener">open PDF</a>`):print(`Resume is available on request: <a href="mailto:mailtokaustubgairola@gmail.com">email me</a>.`),
@@ -205,6 +261,8 @@ async function run(raw,auto){
   if(!auto&&!take()){print(`<span class="e">429 Too Many Spells.</span> Token bucket empty, refills 1 token every 1.5s.`);return}
   if(lc==='clear'||lc==='cls'){out.innerHTML='';return}
   if(spells[lc]){await spells[lc]();return}
+  if(lc==='login'||lc==='login admin'||lc==='logout'){auth(lc);return}
+  if(lc.startsWith('curl ')){await curl(cmd);return}
   if(H[lc]){H[lc]();return}
   if(lc.startsWith('project ')){const key=lc.slice(8).trim();const p=PROJ[ALIAS[key]||key];p?print(p):print(`<span class="e">404 Project Not Found.</span> Try ${k('projects')}.`);return}
   if(lc==='sudo hire kaustub'){print(`<span class="ok">200 OK.</span> Imperius curse accepted. Candidate hired. ${dm('(Offer letter pending HR.)')}`);return}
